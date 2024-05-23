@@ -13,6 +13,8 @@ from tools.evaluate import *
 from torch_geometric.nn import GCNConv
 from BP import Interaction_GraphConvolution as i_GCNConv
 import copy
+from torch_geometric.utils import to_undirected
+
 
 def edges_to_adjacency_matrix(x,edge_index):
     n = x.shape[0]  # 获取节点数量
@@ -28,11 +30,12 @@ class TDrumorGCN(th.nn.Module):
     def __init__(self,in_feats,hid_feats,out_feats):
         super(TDrumorGCN, self).__init__()
         self.conv1 = i_GCNConv(in_feats, hid_feats)
-        self.conv2 = GCNConv(hid_feats+in_feats, out_feats)
+        self.conv2 = GCNConv(hid_feats+2*in_feats, out_feats)
 
     def forward(self, data):
         x, edge_index = data.x.to(device), data.edge_index.to(device)
         adj = edges_to_adjacency_matrix(x,edge_index)
+        edge_index = to_undirected(edge_index)
         mask_father, neighbor_count, mask_hadamard = self.conv1.caculation(adj)
         mask_father = mask_father.to(device)
         neighbor_count = neighbor_count.to(device)
@@ -43,12 +46,12 @@ class TDrumorGCN(th.nn.Module):
         x = th.cat((x,x1),1)
         x2=copy.copy(x)
         rootindex = data.rootindex
-        # root_extend = th.zeros(len(data.batch), x1.size(1)).to(device)
+        root_extend = th.zeros(len(data.batch), x1.size(1)).to(device)
         batch_size = max(data.batch) + 1
-        # for num_batch in range(batch_size):
-        #     index = (th.eq(data.batch.to(device), num_batch))
-        #     root_extend[index] = x1[rootindex[num_batch]]
-        # x = th.cat((x,root_extend), 1)
+        for num_batch in range(batch_size):
+            index = (th.eq(data.batch.to(device), num_batch))
+            root_extend[index] = x1[rootindex[num_batch]]
+        x = th.cat((x,root_extend), 1)
 
         x = F.relu(x)
         x = F.dropout(x, training=self.training)
@@ -81,9 +84,7 @@ def train_GCN(treeDic, x_test, x_train,TDdroprate,lr, weight_decay,patience,n_ep
     model = Net(5000,64,64).to(device)
     TD_params=list(map(id,model.TDrumorGCN.conv1.parameters()))
     TD_params += list(map(id, model.TDrumorGCN.conv2.parameters()))
-    base_params=filter(lambda p:id(p) not in TD_params,model.parameters())
     optimizer = th.optim.Adam([
-        {'params':base_params},
         {'params':model.TDrumorGCN.conv1.parameters(),'lr':lr/5},
         {'params': model.TDrumorGCN.conv2.parameters(), 'lr': lr/5}
     ], lr=lr, weight_decay=weight_decay)
