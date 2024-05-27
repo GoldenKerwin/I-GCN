@@ -15,6 +15,7 @@ from BP import Interaction_GraphConvolution as i_GCNConv
 import copy
 from torch_geometric.utils import to_undirected
 import torch.nn as nn
+from torch_scatter import scatter_add
 
 
 def edges_to_adjacency_matrix(x,edge_index):
@@ -27,22 +28,62 @@ def edges_to_adjacency_matrix(x,edge_index):
     adjacency_matrix = th.from_numpy(adjacency_matrix).float()  # 将邻接矩阵转换为tensor
     return adjacency_matrix
 
+
+def normalize_adjacency(x, edge_index):
+    """
+    对无向图的边进行归一化，不考虑自环，每条边的权重都为1。
+    
+    参数:
+    x (Tensor): 节点特征矩阵。
+    edge_index (Tensor): 无向图的边索引，形状为 [2, num_edges]。
+    
+    返回:
+    Tensor: 归一化的邻接矩阵。
+    """
+    # 确定图中节点的数量
+    num_nodes = x.shape[0]
+    
+    # 移除自环
+    self_loops_mask = edge_index[0] != edge_index[1]
+    edge_index = edge_index[:, self_loops_mask]
+
+    # 创建边权重张量
+    edge_weight = th.ones((edge_index.size(1), ), dtype=th.float32)
+
+    # 计算每个节点的度
+    row, col = edge_index
+    deg = scatter_add(edge_weight, col, dim=0, dim_size=num_nodes)
+
+    # 计算度的逆平方根
+    deg_inv_sqrt = deg.pow(-0.5)
+    deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
+
+    # 应用对称归一化
+    edge_weight_normalized = deg_inv_sqrt[row] * edge_weight * deg_inv_sqrt[col]
+
+    # 创建稀疏的归一化邻接矩阵
+    normalized_adjacency_sparse = th.sparse.FloatTensor(edge_index, edge_weight_normalized, th.Size([num_nodes, num_nodes]))
+    
+    # 转换为密集矩阵
+    normalized_adjacency_dense = normalized_adjacency_sparse.to_dense()
+
+    return normalized_adjacency_dense
+
+
 def caculation(adjacency_matrix):
     num_nodes = adjacency_matrix.size(0)
-    adjacency_no_self_loops = adjacency_matrix.clone()
-    adjacency_no_self_loops[range(num_nodes), range(num_nodes)] = 0
-    adjacency_no_self_loops = adjacency_no_self_loops.float()
+    adjacency_matrix = adjacency_matrix.float()
 
-    sibling_matrix = th.mm(adjacency_no_self_loops, adjacency_no_self_loops) + adjacency_no_self_loops
+    sibling_matrix = th.mm(adjacency_matrix, adjacency_matrix) + adjacency_matrix
 
     sibling_matrix[range(num_nodes), range(num_nodes)] = 0
 
-        # mask_hadamard = sibling_matrix.unsqueeze(2).expand(-1, num_nodes, -1)
+    # mask_hadamard = sibling_matrix.unsqueeze(2).expand(-1, num_nodes, -1)
 
-    mask_hadamard = sibling_matrix.unsqueeze(1).expand(-1, 1, -1)
-    mask_father = adjacency_matrix.unsqueeze(1).expand(-1, 1, -1)
+    mask_hadamard = sibling_matrix.unsqueeze(1).expand(-1, 1, -1).float()
+    mask_father = adjacency_matrix.unsqueeze(1).expand(-1, 1, -1).float()
 
-    neighbor_count = adjacency_no_self_loops.sum(dim=1, keepdim=True)
+    neighbor_count = adjacency_matrix.sum(dim=1, keepdim=True)
     neighbor_count = th.max(neighbor_count, th.ones_like(neighbor_count))
 
     return mask_father, neighbor_count, mask_hadamard
@@ -67,20 +108,23 @@ class TDrumorGCN(th.nn.Module):
         self.linear = DynamicLinear(in_feats)
         self.conv1 = i_GCNConv(in_feats, hid_feats)
         self.conv2 = GCNConv(hid_feats+2*in_feats, out_feats)
+        # self.conv2 = GCNConv(hid_feats+in_feats, out_feats)
 
 
     def forward(self, data, x, edge_index, adj, mask_father, neighbor_count, mask_hadamard):
         x = x.to(device)
         edge_index = edge_index.to(device)
         adj = adj.to(device)
-        # edge_index = to_undirected(edge_index)
         mask_father = mask_father.to(device)
         neighbor_count = neighbor_count.to(device)
         mask_hadamard = mask_hadamard.to(device)
+        
         x = self.linear(x)
         x1 = copy.copy(x.float())
-        x = self.conv1(x, adj, mask_father, neighbor_count, mask_hadamard )
+        
+        x = self.conv1(x, adj, mask_father, neighbor_count, mask_hadamard)
         x = th.cat((x,x1),1)
+        
         x2=copy.copy(x)
         
         rootindex = data.rootindex
@@ -110,6 +154,7 @@ class Net(th.nn.Module):
         super(Net, self).__init__()
         self.TDrumorGCN = TDrumorGCN(in_feats, hid_feats, out_feats)
         self.fc=th.nn.Linear((out_feats+hid_feats+in_feats),4)
+        # self.fc=th.nn.Linear((out_feats),4)
 
     def forward(self, data, x, edge_index, adj, mask_father, neighbor_count, mask_hadamard):
         x = self.TDrumorGCN(data, x, edge_index, adj, mask_father, neighbor_count, mask_hadamard)
@@ -139,7 +184,7 @@ def train_GCN(treeDic, x_test, x_train,TDdroprate,lr, weight_decay,patience,n_ep
             Batch_data.to(device)
             edge_index = to_undirected(Batch_data.edge_index.to(device))
             x = Batch_data.x.to(device)
-            adj = edges_to_adjacency_matrix(x, edge_index)
+            adj = normalize_adjacency(x, edge_index)
             mask_father, neighbor_count, mask_hadamard = caculation(adj)
             out_labels= model(Batch_data, x, edge_index, adj, mask_father, neighbor_count, mask_hadamard)
             finalloss=F.nll_loss(out_labels,Batch_data.y)
@@ -173,7 +218,7 @@ def train_GCN(treeDic, x_test, x_train,TDdroprate,lr, weight_decay,patience,n_ep
         tqdm_test_loader = tqdm(test_loader)
         for Batch_data in tqdm_test_loader:
             Batch_data.to(device)
-            val_out = model(Batch_data)
+            val_out = model(Batch_data, x, edge_index, adj, mask_father, neighbor_count, mask_hadamard)
             val_loss  = F.nll_loss(val_out, Batch_data.y)
             temp_val_losses.append(val_loss.item())
             _, val_pred = val_out.max(dim=1)
