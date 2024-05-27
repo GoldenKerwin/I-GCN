@@ -14,6 +14,7 @@ from torch_geometric.nn import GCNConv
 from BP import Interaction_GraphConvolution as i_GCNConv
 import copy
 from torch_geometric.utils import to_undirected
+import torch.nn as nn
 
 
 def edges_to_adjacency_matrix(x,edge_index):
@@ -26,25 +27,62 @@ def edges_to_adjacency_matrix(x,edge_index):
     adjacency_matrix = th.from_numpy(adjacency_matrix).float()  # 将邻接矩阵转换为tensor
     return adjacency_matrix
 
+def caculation(adjacency_matrix):
+    num_nodes = adjacency_matrix.size(0)
+    adjacency_no_self_loops = adjacency_matrix.clone()
+    adjacency_no_self_loops[range(num_nodes), range(num_nodes)] = 0
+    adjacency_no_self_loops = adjacency_no_self_loops.float()
+
+    sibling_matrix = th.mm(adjacency_no_self_loops, adjacency_no_self_loops) + adjacency_no_self_loops
+
+    sibling_matrix[range(num_nodes), range(num_nodes)] = 0
+
+        # mask_hadamard = sibling_matrix.unsqueeze(2).expand(-1, num_nodes, -1)
+
+    mask_hadamard = sibling_matrix.unsqueeze(1).expand(-1, 1, -1)
+    mask_father = adjacency_matrix.unsqueeze(1).expand(-1, 1, -1)
+
+    neighbor_count = adjacency_no_self_loops.sum(dim=1, keepdim=True)
+    neighbor_count = th.max(neighbor_count, th.ones_like(neighbor_count))
+
+    return mask_father, neighbor_count, mask_hadamard
+
+
+class DynamicLinear(nn.Module):
+    def __init__(self, output_features):
+        super(DynamicLinear, self).__init__()
+        self.output_features = output_features
+        self.linear = None
+
+    def forward(self, x):
+        if self.linear is None:
+            input_features = x.size(-1)
+            self.linear = nn.Linear(input_features, self.output_features)
+            self.linear.to(x.device)  
+        return self.linear(x)
+
 class TDrumorGCN(th.nn.Module):
     def __init__(self,in_feats,hid_feats,out_feats):
         super(TDrumorGCN, self).__init__()
+        self.linear = DynamicLinear(in_feats)
         self.conv1 = i_GCNConv(in_feats, hid_feats)
         self.conv2 = GCNConv(hid_feats+2*in_feats, out_feats)
 
-    def forward(self, data):
-        x, edge_index = data.x.to(device), data.edge_index.to(device)
-        adj = edges_to_adjacency_matrix(x,edge_index)
-        edge_index = to_undirected(edge_index)
-        mask_father, neighbor_count, mask_hadamard = self.conv1.caculation(adj)
+
+    def forward(self, data, x, edge_index, adj, mask_father, neighbor_count, mask_hadamard):
+        x = x.to(device)
+        edge_index = edge_index.to(device)
+        adj = adj.to(device)
+        # edge_index = to_undirected(edge_index)
         mask_father = mask_father.to(device)
         neighbor_count = neighbor_count.to(device)
         mask_hadamard = mask_hadamard.to(device)
-        x = self.conv1.resize(x)
-        x1=copy.copy(x.float())
+        x = self.linear(x)
+        x1 = copy.copy(x.float())
         x = self.conv1(x, adj, mask_father, neighbor_count, mask_hadamard )
         x = th.cat((x,x1),1)
         x2=copy.copy(x)
+        
         rootindex = data.rootindex
         root_extend = th.zeros(len(data.batch), x1.size(1)).to(device)
         batch_size = max(data.batch) + 1
@@ -73,21 +111,16 @@ class Net(th.nn.Module):
         self.TDrumorGCN = TDrumorGCN(in_feats, hid_feats, out_feats)
         self.fc=th.nn.Linear((out_feats+hid_feats+in_feats),4)
 
-    def forward(self, data):
-        x = self.TDrumorGCN(data)
-        x=self.fc(x)
+    def forward(self, data, x, edge_index, adj, mask_father, neighbor_count, mask_hadamard):
+        x = self.TDrumorGCN(data, x, edge_index, adj, mask_father, neighbor_count, mask_hadamard)
+        x = self.fc(x)
         x = F.log_softmax(x, dim=1)
         return x
 
 
 def train_GCN(treeDic, x_test, x_train,TDdroprate,lr, weight_decay,patience,n_epochs,batchsize,dataname,iter):
     model = Net(5000,64,64).to(device)
-    TD_params=list(map(id,model.TDrumorGCN.conv1.parameters()))
-    TD_params += list(map(id, model.TDrumorGCN.conv2.parameters()))
-    optimizer = th.optim.Adam([
-        {'params':model.TDrumorGCN.conv1.parameters(),'lr':lr/5},
-        {'params': model.TDrumorGCN.conv2.parameters(), 'lr': lr/5}
-    ], lr=lr, weight_decay=weight_decay)
+    optimizer = th.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     model.train()
     train_losses = []
     val_losses = []
@@ -104,11 +137,18 @@ def train_GCN(treeDic, x_test, x_train,TDdroprate,lr, weight_decay,patience,n_ep
         tqdm_train_loader = tqdm(train_loader)
         for Batch_data in tqdm_train_loader:
             Batch_data.to(device)
-            out_labels= model(Batch_data)
+            edge_index = to_undirected(Batch_data.edge_index.to(device))
+            x = Batch_data.x.to(device)
+            adj = edges_to_adjacency_matrix(x, edge_index)
+            mask_father, neighbor_count, mask_hadamard = caculation(adj)
+            out_labels= model(Batch_data, x, edge_index, adj, mask_father, neighbor_count, mask_hadamard)
             finalloss=F.nll_loss(out_labels,Batch_data.y)
             loss=finalloss
             optimizer.zero_grad()
             loss.backward()
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    print(f"{name} grad: {param.grad.norm()}")
             avg_loss.append(loss.item())
             optimizer.step()
             _, pred = out_labels.max(dim=-1)
