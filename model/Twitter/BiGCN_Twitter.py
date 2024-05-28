@@ -185,7 +185,7 @@ def train_GCN(treeDic, x_test, x_train,TDdroprate,lr, weight_decay,patience,n_ep
         for Batch_data in tqdm_train_loader:
             Batch_data.to(device)
             edge_index = to_undirected(Batch_data.edge_index.to(device))
-            x = Batch_data.x.to(device)
+            x = (Batch_data.x).to(device)
             adj = normalize_adjacency(x, edge_index)
             mask_father, neighbor_count, mask_hadamard = caculation(adj)
             out_labels= model(Batch_data, edge_index, adj, mask_father, neighbor_count, mask_hadamard)
@@ -220,7 +220,11 @@ def train_GCN(treeDic, x_test, x_train,TDdroprate,lr, weight_decay,patience,n_ep
         tqdm_test_loader = tqdm(test_loader)
         for Batch_data in tqdm_test_loader:
             Batch_data.to(device)
-            val_out = model(Batch_data, x, edge_index, adj, mask_father, neighbor_count, mask_hadamard)
+            edge_index = to_undirected(Batch_data.edge_index.to(device))
+            x = Batch_data.x
+            adj = normalize_adjacency(x, edge_index)
+            mask_father, neighbor_count, mask_hadamard = caculation(adj)
+            val_out = model(Batch_data, edge_index, adj, mask_father, neighbor_count, mask_hadamard)
             val_loss  = F.nll_loss(val_out, Batch_data.y)
             temp_val_losses.append(val_loss.item())
             _, val_pred = val_out.max(dim=1)
