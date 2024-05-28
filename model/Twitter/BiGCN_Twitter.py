@@ -40,6 +40,8 @@ def normalize_adjacency(x, edge_index):
     返回:
     Tensor: 归一化的邻接矩阵。
     """
+    device = th.device('cuda:0' if th.cuda.is_available() else 'cpu')
+
     # 确定图中节点的数量
     num_nodes = x.shape[0]
     
@@ -52,6 +54,7 @@ def normalize_adjacency(x, edge_index):
 
     # 计算每个节点的度
     row, col = edge_index
+    edge_weight = edge_weight.to(device)
     deg = scatter_add(edge_weight, col, dim=0, dim_size=num_nodes)
 
     # 计算度的逆平方根
@@ -111,21 +114,20 @@ class TDrumorGCN(th.nn.Module):
         # self.conv2 = GCNConv(hid_feats+in_feats, out_feats)
 
 
-    def forward(self, data, x, edge_index, adj, mask_father, neighbor_count, mask_hadamard):
-        x = x.to(device)
-        edge_index = edge_index.to(device)
+    def forward(self, data, edge_index, adj, mask_father, neighbor_count, mask_hadamard):
+        x = ((data.x).float()).to(device)
         adj = adj.to(device)
         mask_father = mask_father.to(device)
         neighbor_count = neighbor_count.to(device)
         mask_hadamard = mask_hadamard.to(device)
         
         x = self.linear(x)
-        x1 = copy.copy(x.float())
+        x1 = (x).clone()
         
         x = self.conv1(x, adj, mask_father, neighbor_count, mask_hadamard)
         x = th.cat((x,x1),1)
         
-        x2=copy.copy(x)
+        x2=x.clone()
         
         rootindex = data.rootindex
         root_extend = th.zeros(len(data.batch), x1.size(1)).to(device)
@@ -156,8 +158,8 @@ class Net(th.nn.Module):
         self.fc=th.nn.Linear((out_feats+hid_feats+in_feats),4)
         # self.fc=th.nn.Linear((out_feats),4)
 
-    def forward(self, data, x, edge_index, adj, mask_father, neighbor_count, mask_hadamard):
-        x = self.TDrumorGCN(data, x, edge_index, adj, mask_father, neighbor_count, mask_hadamard)
+    def forward(self, data, edge_index, adj, mask_father, neighbor_count, mask_hadamard):
+        x = self.TDrumorGCN(data, edge_index, adj, mask_father, neighbor_count, mask_hadamard)
         x = self.fc(x)
         x = F.log_softmax(x, dim=1)
         return x
@@ -186,7 +188,7 @@ def train_GCN(treeDic, x_test, x_train,TDdroprate,lr, weight_decay,patience,n_ep
             x = Batch_data.x.to(device)
             adj = normalize_adjacency(x, edge_index)
             mask_father, neighbor_count, mask_hadamard = caculation(adj)
-            out_labels= model(Batch_data, x, edge_index, adj, mask_father, neighbor_count, mask_hadamard)
+            out_labels= model(Batch_data, edge_index, adj, mask_father, neighbor_count, mask_hadamard)
             finalloss=F.nll_loss(out_labels,Batch_data.y)
             loss=finalloss
             optimizer.zero_grad()
