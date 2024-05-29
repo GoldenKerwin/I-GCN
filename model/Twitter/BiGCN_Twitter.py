@@ -40,8 +40,6 @@ def normalize_adjacency(x, edge_index):
     返回:
     Tensor: 归一化的邻接矩阵。
     """
-    device = th.device('cuda:0' if th.cuda.is_available() else 'cpu')
-
     # 确定图中节点的数量
     num_nodes = x.shape[0]
     
@@ -50,7 +48,7 @@ def normalize_adjacency(x, edge_index):
     edge_index = edge_index[:, self_loops_mask]
 
     # 创建边权重张量
-    edge_weight = th.ones((edge_index.size(1), ), dtype=th.float32)
+    edge_weight = th.ones((edge_index.size(1), ), dtype=th.float32).to(device)
 
     # 计算每个节点的度
     row, col = edge_index
@@ -86,10 +84,7 @@ def caculation(adjacency_matrix):
     mask_hadamard = sibling_matrix.unsqueeze(1).expand(-1, 1, -1).float()
     mask_father = adjacency_matrix.unsqueeze(1).expand(-1, 1, -1).float()
 
-    neighbor_count = adjacency_matrix.sum(dim=1, keepdim=True)
-    neighbor_count = th.max(neighbor_count, th.ones_like(neighbor_count))
-
-    return mask_father, neighbor_count, mask_hadamard
+    return mask_father, mask_hadamard
 
 
 class DynamicLinear(nn.Module):
@@ -108,21 +103,20 @@ class DynamicLinear(nn.Module):
 class TDrumorGCN(th.nn.Module):
     def __init__(self,in_feats,hid_feats,out_feats):
         super(TDrumorGCN, self).__init__()
-        self.linear = DynamicLinear(in_feats)
+        # self.linear = DynamicLinear(in_feats)
         self.conv1 = i_GCNConv(in_feats, hid_feats)
         self.conv2 = GCNConv(hid_feats+2*in_feats, out_feats)
 
-    def forward(self, data, x, edge_index, adj, mask_father, neighbor_count, mask_hadamard):
+    def forward(self, data, x, edge_index, adj, mask_father, mask_hadamard):
         x = x.float()
         adj = adj.to(device)
         mask_father = mask_father.to(device)
-        neighbor_count = neighbor_count.to(device)
         mask_hadamard = mask_hadamard.to(device)
         
-        x = self.linear(x)
+        # x = self.linear(x)
         x1 = (x).clone()
         
-        x = self.conv1(x, adj, mask_father, neighbor_count, mask_hadamard)
+        x = self.conv1(x, adj, mask_father, mask_hadamard)
         x = th.cat((x,x1),1)
         
         x2=x.clone()
@@ -155,8 +149,8 @@ class Net(th.nn.Module):
         self.TDrumorGCN = TDrumorGCN(in_feats, hid_feats, out_feats)
         self.fc=th.nn.Linear((out_feats+hid_feats+in_feats),4)
 
-    def forward(self, data, edge_index, adj, mask_father, neighbor_count, mask_hadamard):
-        x = self.TDrumorGCN(data, x, edge_index, adj, mask_father, neighbor_count, mask_hadamard)
+    def forward(self, data, x, edge_index, adj, mask_father, mask_hadamard):
+        x = self.TDrumorGCN(data, x, edge_index, adj, mask_father, mask_hadamard)
         x = self.fc(x)
         x = F.log_softmax(x, dim=1)
         return x
@@ -184,8 +178,8 @@ def train_GCN(treeDic, x_test, x_train,TDdroprate,lr, weight_decay,patience,n_ep
             edge_index = to_undirected(Batch_data.edge_index.to(device))
             x = (Batch_data.x).to(device)
             adj = normalize_adjacency(x, edge_index)
-            mask_father, neighbor_count, mask_hadamard = caculation(adj)
-            out_labels= model(Batch_data, x, edge_index, adj, mask_father, neighbor_count, mask_hadamard)
+            mask_father, mask_hadamard = caculation(adj)
+            out_labels= model(Batch_data, x, edge_index, adj, mask_father, mask_hadamard)
             finalloss=F.nll_loss(out_labels,Batch_data.y)
             loss=finalloss
             optimizer.zero_grad()
@@ -220,8 +214,8 @@ def train_GCN(treeDic, x_test, x_train,TDdroprate,lr, weight_decay,patience,n_ep
             edge_index = to_undirected(Batch_data.edge_index.to(device))
             x = Batch_data.x
             adj = normalize_adjacency(x, edge_index)
-            mask_father, neighbor_count, mask_hadamard = caculation(adj)
-            val_out = model(Batch_data, x, edge_index, adj, mask_father, neighbor_count, mask_hadamard)
+            mask_father, mask_hadamard = caculation(adj)
+            val_out = model(Batch_data, x, edge_index, adj, mask_father, mask_hadamard)
             val_loss  = F.nll_loss(val_out, Batch_data.y)
             temp_val_losses.append(val_loss.item())
             _, val_pred = val_out.max(dim=1)
