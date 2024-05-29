@@ -1,4 +1,4 @@
-torch_scatter
+torch_scatter==2.1.2
 scikit-learn==1.0.2
 torch_sparse==0.4.3
 torch_cluster==1.4.5
